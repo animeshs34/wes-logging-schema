@@ -1,0 +1,199 @@
+# ============================================================
+# Proposed patch for Issue #215
+# Add support for external logging schemas in WES
+# ============================================================
+#
+# Problem being solved:
+#   WES currently has no way to describe the SHAPE of log data.
+#   If an implementation returns OPM provenance or RO-Crate
+#   structured logs inside stdout/stderr, clients have to guess
+#   the format. Also, there is no single canonical place per
+#   logging level where structured logs must live.
+#
+# This patch proposes:
+#   1. A new `LogSchema` object — describes the shape of a log
+#   2. A new `structured_log` field in both RunLog and TaskLog —
+#      the ONE canonical place for structured log data
+#   3. A `log_schema` field in RunLog and TaskLog that points
+#      to the schema describing `structured_log`
+# ============================================================
+
+components:
+  schemas:
+
+    # --------------------------------------------------------
+    # NEW: LogSchema
+    # Describes the schema of structured log content so that
+    # clients can understand and validate log payloads without
+    # guessing the format.
+    # --------------------------------------------------------
+    LogSchema:
+      type: object
+      description: >
+        Describes the schema of structured log content returned
+        in the `structured_log` field of RunLog or TaskLog.
+        Allows clients to understand the shape of log data
+        without having to guess or hardcode format assumptions.
+      required:
+        - schema_uri
+      properties:
+        schema_uri:
+          type: string
+          format: uri
+          description: >
+            URI pointing to the external schema definition.
+            This SHOULD be a resolvable URI. Supported formats
+            include JSON Schema, JSON-LD context, or any
+            machine-readable schema specification.
+          example: "https://www.w3.org/TR/prov-o/"
+        format:
+          type: string
+          description: >
+            Well-known log format identifier. Use `custom` when
+            the format does not match any well-known standard.
+          enum:
+            - opm          # W3C PROV / Open Provenance Model
+            - ro-crate     # Workflow Run RO-Crate
+            - json-schema  # Generic JSON Schema
+            - custom       # Any other format
+          example: "ro-crate"
+        media_type:
+          type: string
+          description: >
+            MIME type of the structured log content stored in
+            `structured_log`. Defaults to `application/json`.
+          default: "application/json"
+          example: "application/json"
+        schema_version:
+          type: string
+          description: >
+            Version of the schema being referenced. Helps clients
+            handle backward-incompatible schema changes.
+          example: "1.0.0"
+
+    # --------------------------------------------------------
+    # MODIFIED: RunLog
+    # Adds `structured_log` and `log_schema` fields.
+    # All existing fields are UNCHANGED — this is additive only.
+    # --------------------------------------------------------
+    RunLog:
+      type: object
+      description: >
+        Log and other info about a workflow run. Contains both
+        legacy plain-text logs (stdout/stderr) and the new
+        structured_log field for machine-readable log content.
+      properties:
+        # --- Existing fields (UNCHANGED) ---
+        name:
+          type: string
+          description: The name of the workflow run.
+        cmd:
+          type: array
+          items:
+            type: string
+          description: >
+            The list of commands executed by the workflow run,
+            for debugging purposes.
+        start_time:
+          type: string
+          description: When the run started, in ISO 8601 format.
+        end_time:
+          type: string
+          description: When the run ended, in ISO 8601 format.
+        stdout:
+          type: string
+          description: >
+            A URL to retrieve standard output logs of the
+            workflow run or task. This field is for PLAIN TEXT
+            only. For structured logs, use `structured_log`.
+        stderr:
+          type: string
+          description: >
+            A URL to retrieve standard error logs of the
+            workflow run or task. This field is for PLAIN TEXT
+            only. For structured logs, use `structured_log`.
+        exit_code:
+          type: integer
+          description: Exit code of the workflow run.
+
+        # --- NEW FIELDS ---
+        structured_log:
+          type: string
+          description: >
+            The CANONICAL location for structured log content
+            at the workflow level. This is either the log data
+            itself (inline) or a URI to retrieve it.
+            The shape of this content is described by `log_schema`.
+            Implementations MUST use this field (not stdout/stderr)
+            when returning structured/machine-readable log data.
+          example: '{"@context": "https://w3id.org/ro/crate/1.1/context", ...}'
+        log_schema:
+          $ref: '#/components/schemas/LogSchema'
+          description: >
+            Describes the schema of the content in `structured_log`.
+            Clients SHOULD use this field to determine how to
+            parse and interpret `structured_log` content.
+            If `structured_log` is absent, this field has no effect.
+
+    # --------------------------------------------------------
+    # MODIFIED: TaskLog
+    # Same additive changes as RunLog, but at the task level.
+    # --------------------------------------------------------
+    TaskLog:
+      type: object
+      description: >
+        Log and other info about an individual task within a
+        workflow run.
+      properties:
+        # --- Existing fields (UNCHANGED) ---
+        logs:
+          type: array
+          description: >
+            The logs, and other key info like timing and exit
+            code, for each attempt at running a step in the
+            workflow run.
+          items:
+            $ref: '#/components/schemas/Log'
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: >
+            Arbitrary logging metadata included by the
+            workflow engine.
+        start_time:
+          type: string
+          description: When the task started, in ISO 8601 format.
+        end_time:
+          type: string
+          description: When the task ended, in ISO 8601 format.
+        stdout:
+          type: string
+          description: >
+            A URL to retrieve plain text standard output of
+            this task. For structured logs, use `structured_log`.
+        stderr:
+          type: string
+          description: >
+            A URL to retrieve plain text standard error of
+            this task. For structured logs, use `structured_log`.
+        exit_code:
+          type: integer
+          description: Exit code of the task.
+
+        # --- NEW FIELDS ---
+        structured_log:
+          type: string
+          description: >
+            The CANONICAL location for structured log content
+            at the task level. The shape of this content is
+            described by `log_schema`.
+            Implementations MUST use this field (not stdout/stderr)
+            when returning structured/machine-readable log data
+            for a task.
+        log_schema:
+          $ref: '#/components/schemas/LogSchema'
+          description: >
+            Describes the schema of the content in `structured_log`
+            at the task level. If absent, the task-level log schema
+            MAY be inherited from the parent RunLog's `log_schema`.
